@@ -1,3 +1,3 @@
 # CUDA-Convolve
 
-![time results](capture.PNG)
+![time results](Capture.PNG)
