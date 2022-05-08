@@ -63,7 +63,7 @@ int main()
     dim3 dimBlock(32, 32, 1);
 
     cudaEventRecord(start);
-    conv_2D<<<dimGrid, dimBlock>>>(dev_input, dev_output, 0);
+    conv_2D_cached <<<dimGrid, dimBlock>>>(dev_input, dev_output, 0);
     cudaEventRecord(stop);
 
     cudaMemcpy(output, dev_output, HEIGHT * WIDTH * sizeof(float), cudaMemcpyDeviceToHost);
@@ -116,6 +116,58 @@ __global__ void conv_2D(float* input_arr, float* output_arr, float missing_value
             }
         }
     }
-    output_arr[row_index * WIDTH + col_index] = accumulator;
+    // output_arr[row_index * WIDTH + col_index] = accumulator;
+    if (row_index >= HALF_SPAN && col_index >= HALF_SPAN &&
+        row_index < (HEIGHT - HALF_SPAN) && col_index < (WIDTH - HALF_SPAN))
+        output_arr[row_index * WIDTH + col_index] = accumulator;
+    else
+        output_arr[row_index * WIDTH + col_index] = missing_value;
 }
 
+__global__ void conv_2D_cached(float* input_arr, float* output_arr, float missing_value) {
+    int row_index = blockIdx.y * blockDim.y + threadIdx.y;
+    int col_index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    // halo cells will be handeled at L2 Cache
+    // not enough shared memory for them
+    __shared__ float input_arr_ds[TILE_SIZE][TILE_SIZE];
+
+    if (row_index < HEIGHT && col_index < WIDTH)
+    {
+        input_arr_ds[tx][ty] = input_arr[row_index * WIDTH + col_index];
+    }
+    __syncthreads();
+
+
+    // to handel boundries
+    int current_row_index;
+    int current_col_index;
+    float accumulator = 0;
+    for (int i = -HALF_SPAN; i <= HALF_SPAN; i++) {
+        for (int j = -HALF_SPAN; j <= HALF_SPAN; j++) {
+            current_row_index = tx + i;
+            current_col_index = ty + j;
+
+            if (current_row_index >= 0 && current_row_index < TILE_SIZE &&
+                current_col_index >= 0 && current_col_index < TILE_SIZE) {
+                accumulator += input_arr_ds[current_row_index][current_col_index] * 
+                    dev_mask[(i+ HALF_SPAN) * MASK_WIDTH + (j+ HALF_SPAN)];
+            }
+            else
+            { // right or left, ghost or halo
+                accumulator += (current_row_index < 0 || current_row_index >= TILE_SIZE ||
+                    current_col_index < 0 || current_col_index >= TILE_SIZE)
+                    ? missing_value * dev_mask[(i + HALF_SPAN) * MASK_WIDTH + (j + HALF_SPAN)]
+                    : input_arr[current_row_index * WIDTH + current_col_index] * dev_mask[(i + HALF_SPAN) * MASK_WIDTH + (j + HALF_SPAN)]; // not in shared memory
+            }
+        }
+    }
+    if (row_index >= HALF_SPAN && col_index >= HALF_SPAN && 
+        row_index < (HEIGHT - HALF_SPAN) && col_index < (WIDTH- HALF_SPAN))
+        output_arr[row_index * WIDTH + col_index] = accumulator;
+    else
+        output_arr[row_index * WIDTH + col_index] = missing_value;
+}
